@@ -28,46 +28,59 @@
 #pragma once
 #endif // _MSC_VER > 1000
 
-#define VC_EXTRALEAN		// Selten verwendete Teile der Windows-Header nicht einbinden
+#define WIN32_LEAN_AND_MEAN		// Selten verwendete Teile der Windows-Header nicht einbinden
 
 #pragma warning (disable : 4786)
 
-#include <afxwin.h>         // MFC-Kern- und -Standardkomponenten
-#include <afxext.h>         // MFC-Erweiterungen
-#include <afxdisp.h>        // MFC Automatisierungsklassen
-#include <afxdtctl.h>		// MFC-Unterstützung für allgemeine Steuerelemente von Internet Explorer 4
-#ifndef _AFX_NO_AFXCMN_SUPPORT
-#include <afxcmn.h>			// MFC-Unterstützung für gängige Windows-Steuerelemente
-#endif // _AFX_NO_AFXCMN_SUPPORT
+#include <windows.h>
+#include <crtdbg.h>
+#include <stddef.h>
 
-//#include <afxsock.h>		// MFC-Socket-Erweiterungen
-#include "afxcview.h"
+#include <wtypes.h>
+#include <oleauto.h>
 #include "atlconv.h"
 
-#include "Shlwapi.h"
+#include "shlobj.h"
 
+#include "config.h"
+
+#include "misc\stdstring.h"
+
+#include "MFC64bitFix.h"
 #include <map>
-#include <vector>
 #include <list>
-
-#include <assert.h>
-#include <iostream>
+#include <vector>
+#include <set>
 
 #ifdef MMGR
-#include "../misc/mmgr.h"
+#include "misc/mmgr.h"
 #endif
 
-#include "misc\saprefsdialog.h"
-#include "misc\saprefssubdlg.h"
+#include "conversion.h"
 
-#include "../AsyncSocketEx.h"
-#include <afxdhtml.h>
+#include "AsyncSocketEx.h"
 
-#define CStdString CString
-#define CStdStringW CStringW
-#define CStdStringA CStringA
+#define FILEZILLA_SERVER_MESSAGE _T("FileZilla Server Message")
+#define FILEZILLA_THREAD_MESSAGE _T("FileZilla Thread Message")
 
-#include "../conversion.h"
+const UINT WM_FILEZILLA_RELOADCONFIG = WM_APP;
+const UINT WM_FILEZILLA_SERVERMSG = (WM_APP + 1);
+const UINT WM_FILEZILLA_THREADMSG = ::RegisterWindowMessage(FILEZILLA_THREAD_MESSAGE);
+
+#define FSM_STATUSMESSAGE 0
+#define FSM_CONNECTIONDATA 1
+#define FSM_THREADCANQUIT 2
+#define FSM_SEND 3
+#define FSM_RECV 4
+
+#define FTM_NEWSOCKET 0
+#define FTM_DELSOCKET 1
+#define FTM_COMMAND 2
+#define FTM_TRANSFERMSG 3
+#define FTM_GOOFFLINE 4
+#define FTM_CONTROL 5
+#define FTM_NEWSOCKET_SSL 6
+#define FTM_HASHRESULT 7
 
 #define USERCONTROL_GETLIST 0
 #define USERCONTROL_CONNOP 1
@@ -77,8 +90,115 @@
 #define USERCONTROL_CONNOP_ADD 0
 #define USERCONTROL_CONNOP_CHANGEUSER 1
 #define USERCONTROL_CONNOP_REMOVE 2
-#define USERCONTROL_CONNOP_TRANSFERINFO 3
+#define USERCONTROL_CONNOP_TRANSFERINIT 3
 #define USERCONTROL_CONNOP_TRANSFEROFFSETS 4
+
+typedef struct
+{
+	int command;
+	int socketid;
+} t_controlmessage;
+
+typedef struct
+{
+	TCHAR ip[40];
+	LPTSTR user;
+	SYSTEMTIME time;
+	UINT userid;
+	int type;
+	LPTSTR status;
+} t_statusmsg;
+
+class CServerThread;
+typedef struct
+{
+	int userid;
+	
+	// Set only by USERCONTROL_CONNOP_CHANGEUSER messages
+	CStdString user;
+
+	// Set only by USERCONTROL_CONNOP_ADD messages
+	TCHAR ip[40];
+	unsigned int port;
+	CServerThread *pThread;
+
+	// Set only by USERCONTROL_CONNOP_TRANSFERINFO messages
+	unsigned char transferMode;
+	CStdString physicalFile;
+	CStdString logicalFile;
+	__int64 currentOffset;
+	__int64 totalSize;
+} t_connectiondata;
+
+struct t_connectiondata_add
+{
+	TCHAR ip[40];
+	unsigned int port;
+	CServerThread *pThread;
+};
+
+struct t_connectiondata_changeuser
+{
+	CStdString user;
+};
+
+struct t_connectiondata_transferinfo
+{
+	unsigned char transferMode;
+	CStdString physicalFile;
+	CStdString logicalFile;
+	__int64 startOffset;
+	__int64 totalSize;
+};
+
+struct t_connectiondata_transferoffsets
+{
+	unsigned char* pData;
+	int len;
+};
+
+typedef struct
+{
+	void *data;
+	int op;
+	int userid;
+} t_connop;
+
+extern HWND hMainWnd;
+#ifndef CCRITICALSECTIONWRAPPERINCLUDED
+class CCriticalSectionWrapper
+{
+public:
+	CCriticalSectionWrapper();
+	~CCriticalSectionWrapper();
+	
+	void Lock();
+	void Unlock();
+
+#ifndef DEADLOCKDEBUG
+protected:
+#else
+public:
+#endif
+	CRITICAL_SECTION m_criticalSection;
+	BOOL m_bInitialized;
+#ifdef DEBUG
+	int m_lockCount;
+#endif
+
+};
+#define CCRITICALSECTIONWRAPPERINCLUDED
+#endif
+
+#ifndef DEADLOCKDEBUG
+#define EnterCritSection(section) section.Lock()
+#define LeaveCritSection(section) section.Unlock()
+#else
+void EnterCritSectionDebug(CCriticalSectionWrapper &section, const char *pFile, int line);
+void LeaveCritSectionDebug(CCriticalSectionWrapper &section, const char *pFile, int line);
+#define EnterCritSection(section) EnterCritSectionDebug(section, __FILE__, __LINE__)
+#define LeaveCritSection(section) LeaveCritSectionDebug(section, __FILE__, __LINE__)
+#endif
 
 //{{AFX_INSERT_LOCATION}}
 // Microsoft Visual C++ fügt unmittelbar vor der vorhergehenden Zeile zusätzliche Deklarationen ein.
