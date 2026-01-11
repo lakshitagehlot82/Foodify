@@ -22,411 +22,117 @@
 
 #include "stdafx.h"
 #include "AdminSocket.h"
-#include "MainFrm.h"
-#include "../iputils.h"
-#include "../OptionTypes.h"
-#include "../platform.h"
-#include "../misc\md5.h"
+#include "AdminInterface.h"
+#include "OptionTypes.h"
+#include "misc\md5.h"
+#include "iputils.h"
+#include "Options.h"
+#include "version.h"
+
+#define BUFSIZE 4096
 
 //////////////////////////////////////////////////////////////////////
 // Konstruktion/Destruktion
 //////////////////////////////////////////////////////////////////////
 
-#define BUFSIZE 4096
-
-CAdminSocket::CAdminSocket(CMainFrame *pMainFrame)
+CAdminSocket::CAdminSocket(CAdminInterface *pAdminInterface)
 {
-	ASSERT(pMainFrame);
-	m_pMainFrame = pMainFrame;
+	ASSERT(pAdminInterface);
+	m_pAdminInterface = pAdminInterface;
+	m_bStillNeedAuth = TRUE;
+
 	m_pRecvBuffer = new unsigned char[BUFSIZE];
 	m_nRecvBufferLen = BUFSIZE;
 	m_nRecvBufferPos = 0;
-	m_nConnectionState = 0;
-	m_bClosed = FALSE;
+	
+	SYSTEMTIME sTime;
+	GetSystemTime(&sTime);
+	VERIFY(SystemTimeToFileTime(&sTime, &m_LastRecvTime));
 }
 
 CAdminSocket::~CAdminSocket()
 {
-	delete [] m_pRecvBuffer;
-	
 	for (std::list<t_data>::iterator iter=m_SendBuffer.begin(); iter!=m_SendBuffer.end(); iter++)
 		delete [] iter->pData;
+
+	delete [] m_pRecvBuffer;
 }
 
-void CAdminSocket::OnConnect(int nErrorCode)
+BOOL CAdminSocket::Init()
 {
-	if (!nErrorCode)
+	char *buffer = new char[100];
+	char *p = buffer;
+	strcpy(buffer, "FZS");
+	p += 3;
+
+	*p++ = 0;
+	*p++ = 4;
+	memcpy(p, &SERVER_VERSION, 4);
+	p += 4;
+	
+	*p++ = 0;
+	*p++ = 4;
+
+	memcpy(p, &PROTOCOL_VERSION, 4);
+	p+=4;
+
+	COptions options;
+	CStdString pass = options.GetOption(OPTION_ADMINPASS);
+	CStdString peerAddress;
+	UINT port = 0;
+	if (GetPeerName(peerAddress, port) && IsLocalhost(peerAddress) && pass == _T(""))
 	{
-		if (!m_nConnectionState)
+		BOOL res = Send(buffer, p-buffer) == p - buffer;
+		delete [] buffer;
+		if (!res)
 		{
-			m_pMainFrame->ShowStatus(_T("Connected, waiting for authentication"), 0);
-			m_nConnectionState = 1;
+			Close();
+			return FALSE;
 		}
-		m_pMainFrame->OnAdminInterfaceConnected();
+		return FinishLogon();		
 	}
 	else
 	{
-		m_pMainFrame->ShowStatus(_T("Error, could not connect to server"), 1);
-		Close();
-	}
-}
+		*p++ = 0;
+		
+		DWORD len = 20;
+		memcpy(p, &len, 4);
+		p += 4;
 
-void CAdminSocket::OnReceive(int nErrorCode)
-{
-	if (nErrorCode)
-	{
-		m_pMainFrame->ShowStatus(_T("OnReceive failed, closing connection"), 1);
-		Close();
-		return;
-	}
-	
-	if (!m_nConnectionState)
-	{
-		m_pMainFrame->ShowStatus(_T("Connected, waiting for authentication"), 0);
-		m_nConnectionState = 1;
-	}
-
-	int numread = Receive(m_pRecvBuffer + m_nRecvBufferPos, m_nRecvBufferLen - m_nRecvBufferPos);
-	if (numread > 0)
-	{
-		m_nRecvBufferPos += numread;
-		if (m_nRecvBufferLen-m_nRecvBufferPos < (BUFSIZE/4))
+		*p++ = 0;
+		*p++ = 8;
+		
+		int i;
+		for (i = 0; i < 8; i++)
 		{
-			unsigned char *tmp = m_pRecvBuffer;
-			m_nRecvBufferLen += BUFSIZE;
-			m_pRecvBuffer = new unsigned char[m_nRecvBufferLen];
-			memcpy(m_pRecvBuffer, tmp, m_nRecvBufferPos);
-			delete [] tmp;
-		}
-	}
-	if (!numread)
-	{
-		Close();
-		return;
-	}
-	else if (numread == SOCKET_ERROR)
-	{
-		if (WSAGetLastError() != WSAEWOULDBLOCK)
-		{
-			Close();
-			return;
-		}
-	}
-	while (ParseRecvBuffer());
-}
-
-void CAdminSocket::OnSend(int nErrorCode)
-{
-	if (nErrorCode)
-	{
-		Close();
-		return;
-	}
-	if (!m_nConnectionState)
-		return;
-
-	while (!m_SendBuffer.empty())
-	{
-		t_data data = m_SendBuffer.front();
-		int nSent = Send(data.pData + data.dwOffset, data.dwLength - data.dwOffset);
-		if (!nSent)
-		{
-			Close();
-			return;
-		}
-		if (nSent == SOCKET_ERROR)
-		{
-			if (WSAGetLastError()!=WSAEWOULDBLOCK)
-				Close();
-			return;
+			m_Nonce1[i] = (rand()*256)/(RAND_MAX+1);
+			*p++ = m_Nonce1[i];
 		}
 		
-		if ((DWORD)nSent < (data.dwLength - data.dwOffset))
-			data.dwOffset += nSent;
-		else
-		{
-			m_SendBuffer.pop_front();
-			delete [] data.pData;
-		}
-	}
-}
-
-void CAdminSocket::Close()
-{
-	if (m_nConnectionState)
-		m_pMainFrame->ShowStatus(_T("Connection to server closed."), 1);
-	m_nConnectionState = 0;
-	if (!m_bClosed)
-	{
-		m_bClosed = TRUE;
-		m_pMainFrame->PostMessage(WM_APP + 1, 0, 0);
-	}
-}
-
-BOOL CAdminSocket::ParseRecvBuffer()
-{
-	DWORD len;
-	switch (m_nConnectionState)
-	{
-	case 1:
-		{
-			if (m_nRecvBufferPos<3)
-				return FALSE;
-			if (m_pRecvBuffer[0] != 'F' || m_pRecvBuffer[1] != 'Z' || m_pRecvBuffer[2] != 'S')
-			{
-				CString str;
-				str.Format(_T("Protocol error: Unknown protocol identifier (0x%d 0x%d 0x%d). Most likely connected to the wrong port."), (int)m_pRecvBuffer[0], (int)m_pRecvBuffer[1], (int)m_pRecvBuffer[2]);
-				m_pMainFrame->ShowStatus(str, 1);
-				Close();
-				return FALSE;
-			}
-			if (m_nRecvBufferPos < 5)
-				return FALSE;
-			len = m_pRecvBuffer[3] * 256 + m_pRecvBuffer[4];
-			if (len != 4)
-			{
-				CString str;
-				str.Format(_T("Protocol error: Invalid server version length (%d)."), len);
-				m_pMainFrame->ShowStatus(str, 1);
-				Close();
-				return FALSE;
-			}
-			if (m_nRecvBufferPos < 9)
-				return FALSE;
-			
-			int version = (int)GET32(m_pRecvBuffer + 5);
-			if (version != SERVER_VERSION)
-			{
-				CString str;
-				str.Format(_T("Protocol warning: Server version mismatch: Server version is %d.%d.%d.%d, interface version is %d.%d.%d.%d"),
-						   (version >> 24) & 0xFF,
-						   (version >> 16) & 0xFF,
-						   (version >>  8) & 0xFF,
-						   (version >>  0) & 0xFF,
-						   (SERVER_VERSION >> 24) & 0xFF,
-						   (SERVER_VERSION >> 16) & 0xFF,
-						   (SERVER_VERSION >>  8) & 0xFF,
-						   (SERVER_VERSION >>  0) & 0xFF);
-				m_pMainFrame->ShowStatus(str, 1);
-			}
-
-			if (m_nRecvBufferPos<11)
-				return FALSE;
-			len = m_pRecvBuffer[9] * 256 + m_pRecvBuffer[10];
-			if (len != 4)
-			{
-				CString str;
-				str.Format(_T("Protocol error: Invalid protocol version length (%d)."), len);
-				m_pMainFrame->ShowStatus(str, 1);
-				Close();
-				return FALSE;
-			}
-			if (m_nRecvBufferPos<15)
-				return FALSE;
-			version = (int)GET32(m_pRecvBuffer + 11);
-			if (version != PROTOCOL_VERSION)
-			{
-				CString str;
-				str.Format(_T("Protocol error: Protocol version mismatch: Server protocol version is %d.%d.%d.%d, interface protocol version is %d.%d.%d.%d"),
-						   (version >> 24) & 0xFF,
-						   (version >> 16) & 0xFF,
-						   (version >>  8) & 0xFF,
-						   (version >>  0) & 0xFF,
-						   (PROTOCOL_VERSION >> 24) & 0xFF,
-						   (PROTOCOL_VERSION >> 16) & 0xFF,
-						   (PROTOCOL_VERSION >>  8) & 0xFF,
-						   (PROTOCOL_VERSION >>  0) & 0xFF);
-				m_pMainFrame->ShowStatus(str, 1);
-				Close();
-				return FALSE;
-			}
-
-			memmove(m_pRecvBuffer, m_pRecvBuffer+15, m_nRecvBufferPos-15);
-			m_nRecvBufferPos-=15;
-			m_nConnectionState = 2;
-		}
-		break;
-	case 2:
-		if (m_nRecvBufferPos<5)
-			return FALSE;
-		if ((m_pRecvBuffer[0]&0x03) > 2)
-		{
-			CString str;
-			str.Format(_T("Protocol error: Unknown command type (%d), closing connection."), (int)(m_pRecvBuffer[0]&0x03));
-			m_pMainFrame->ShowStatus(str, 1);
-			Close();
-			return FALSE;
-		}
-		len = (int)GET32(m_pRecvBuffer + 1);
-		if (len + 5 <= m_nRecvBufferPos)
-		{
-			if ((m_pRecvBuffer[0]&0x03) == 0  &&  (m_pRecvBuffer[0]&0x7C)>>2 == 0)
-			{
-				if (len<4)
-				{
-					m_pMainFrame->ShowStatus(_T("Invalid auth data"), 1);
-					Close();
-					return FALSE;
-				}
-				unsigned char *p = m_pRecvBuffer + 5;
-				
-				unsigned int noncelen1 = *p*256 + p[1];
-				if ((noncelen1+2) > (len-2))
-				{
-					m_pMainFrame->ShowStatus(_T("Invalid auth data"), 1);
-					Close();
-					return FALSE;
-				}
-				
-				unsigned int noncelen2 = p[2 + noncelen1]*256 + p[2 + noncelen1 +1];
-				if ((noncelen1+noncelen2+4) > len)
-				{
-					m_pMainFrame->ShowStatus(_T("Invalid auth data"), 1);
-					Close();
-					return FALSE;
-				}
-				
-				MD5 md5;
-				if (noncelen1)
-					md5.update(p+2, noncelen1);
-				char* utf8 = ConvToNetwork(m_Password);
-				if (!utf8)
-				{
-					m_pMainFrame->ShowStatus(_T("Can't convert password to UTF-8"), 1);
-					Close();
-					return FALSE;
-				}
-				md5.update((const unsigned char *)utf8, strlen(utf8));
-				delete [] utf8;
-				if (noncelen2)
-					md5.update(p+noncelen1+4, noncelen2);
-				md5.finalize();
-				
-				memmove(m_pRecvBuffer, m_pRecvBuffer+len+5, m_nRecvBufferPos-len-5);
-				m_nRecvBufferPos-=len+5;
-				
-				unsigned char *digest = md5.raw_digest();
-				SendCommand(0, digest, 16);
-				delete [] digest;
-				m_nConnectionState=3;
-				return TRUE;
-			}
-			else if ((m_pRecvBuffer[0]&0x03) == 1  &&  (m_pRecvBuffer[0]&0x7C)>>2 == 0)
-			{
-				m_nConnectionState=3;
-				m_pMainFrame->ParseReply((m_pRecvBuffer[0]&0x7C)>>2, m_pRecvBuffer+5, len);
-			}
-			else
-			{
-				CString str;
-				str.Format(_T("Protocol error: Unknown command ID (%d), closing connection."), (int)(m_pRecvBuffer[0]&0x7C)>>2);
-				m_pMainFrame->ShowStatus(str, 1);
-				Close();
-				return FALSE;
-			}
-			memmove(m_pRecvBuffer, m_pRecvBuffer+len+5, m_nRecvBufferPos-len-5);
-			m_nRecvBufferPos-=len+5;
-		}
-		break;
-	case 3:
-		if (m_nRecvBufferPos < 5)
-			return FALSE;
-		int nType = *m_pRecvBuffer & 0x03;
-		int nID = (*m_pRecvBuffer & 0x7C) >> 2;
-		if (nType > 2 || nType < 1)
-		{
-			CString str;
-			str.Format(_T("Protocol error: Unknown command type (%d), closing connection."), nType);
-			m_pMainFrame->ShowStatus(str, 1);
-			Close();
-			return FALSE;
-		}
-		else
-		{
-			len = (unsigned int)GET32(m_pRecvBuffer + 1);
-			if (len > 0xFFFFFF)
-			{
-				CString str;
-				str.Format(_T("Protocol error: Invalid data length (%u) for command (%d:%d)"), len, nType, nID);
-				m_pMainFrame->ShowStatus(str, 1);
-				Close();
-				return FALSE;
-			}				
-			if (m_nRecvBufferPos < len+5)
-				return FALSE;
-			else
-			{
-				if (nType == 1)
-					m_pMainFrame->ParseReply(nID, m_pRecvBuffer + 5, len);
-				else if (nType == 2)
-					m_pMainFrame->ParseStatus(nID, m_pRecvBuffer + 5, len);
-				else
-				{
-					CString str;
-					str.Format(_T("Protocol warning: Command type %d not implemented."), nType);
-					m_pMainFrame->ShowStatus(str, 1);
-				}
-				
-				memmove(m_pRecvBuffer, m_pRecvBuffer+len+5, m_nRecvBufferPos-len-5);
-				m_nRecvBufferPos-=len+5;
-			}
-		}
-		break;
-	}
-	return TRUE;
-}
-
-BOOL CAdminSocket::SendCommand(int nType)
-{
-	t_data data;
-	data.pData = new unsigned char[5];
-	data.pData[0] = nType << 2;
-	data.dwOffset = 0;
-	DWORD dwDataLength = 0;
-	memcpy(data.pData + 1, &dwDataLength, 4);
-
-	data.dwLength = 5;
-
-	m_SendBuffer.push_back(data);
-	
-	do 
-	{
-		data=m_SendBuffer.front();
-		int nSent = Send(data.pData+data.dwOffset, data.dwLength-data.dwOffset);
-		if (!nSent)
-		{
-			Close();
-			return FALSE;
-		}
-		if (nSent == SOCKET_ERROR)
-		{
-			if (WSAGetLastError()!=WSAEWOULDBLOCK)
-			{
-				Close();
-				return FALSE;
-			}
-			return TRUE;
-		}
+		*p++ = 0;
+		*p++ = 8;
 		
-		if ((DWORD)nSent < (data.dwLength-data.dwOffset))
-			data.dwOffset+=nSent;
-		else
+		for (i = 0; i < 8; i++)
 		{
-			m_SendBuffer.pop_front();
-			delete [] data.pData;
+			m_Nonce2[i] = (rand()*256)/(RAND_MAX+1);
+			*p++ = m_Nonce2[i];
 		}
-	} while (!m_SendBuffer.empty());
+	}
 
-	return TRUE;
+	int res = Send(buffer, p-buffer) == p-buffer;
+	delete [] buffer;
+	return res;
 }
 
-BOOL CAdminSocket::SendCommand(int nType, void *pData, int nDataLength)
+BOOL CAdminSocket::SendCommand(int nType, int nID, const void *pData, int nDataLength)
 {
-	ASSERT((pData && nDataLength) || (!pData && !nDataLength));
-	
+	if (m_bStillNeedAuth)
+		return TRUE;
+
 	t_data data;
-	data.pData = new unsigned char[nDataLength+5];
-	data.pData[0] = nType << 2;
+	data.pData = new unsigned char[nDataLength + 5];
+	*data.pData = nType;
+	*data.pData |= nID << 2;
 	data.dwOffset = 0;
 	memcpy(data.pData + 1, &nDataLength, 4);
 	if (pData)
@@ -436,59 +142,298 @@ BOOL CAdminSocket::SendCommand(int nType, void *pData, int nDataLength)
 
 	m_SendBuffer.push_back(data);
 	
-	do 
+	do
 	{
-		data=m_SendBuffer.front();
-		int nSent = Send(data.pData+data.dwOffset, data.dwLength-data.dwOffset);
+		data = m_SendBuffer.front();
+		m_SendBuffer.pop_front();
+		int nSent = Send(data.pData + data.dwOffset, data.dwLength - data.dwOffset);
 		if (!nSent)
-		{
-			Close();
 			return FALSE;
-		}
 		if (nSent == SOCKET_ERROR)
 		{
 			if (WSAGetLastError()!=WSAEWOULDBLOCK)
-			{
-				Close();
 				return FALSE;
-			}
+			m_SendBuffer.push_front(data);
 			return TRUE;
 		}
 		
-		if ((DWORD)nSent < (data.dwLength-data.dwOffset))
+		if ((unsigned int)nSent < (data.dwLength-data.dwOffset))
+		{
 			data.dwOffset += nSent;
+			m_SendBuffer.push_front(data);
+		}
 		else
 		{
-			m_SendBuffer.pop_front();
 			delete [] data.pData;
+
+			SYSTEMTIME sTime;
+			GetSystemTime(&sTime);
+			VERIFY(SystemTimeToFileTime(&sTime, &m_LastRecvTime));
 		}
 	} while (!m_SendBuffer.empty());
 
 	return TRUE;
 }
 
-BOOL CAdminSocket::IsConnected()
+void CAdminSocket::OnReceive(int nErrorCode)
 {
-	return m_nConnectionState == 3;
+	if (nErrorCode)
+	{
+		Close();
+		m_pAdminInterface->Remove(this);
+		return;
+	}
+	int numread = Receive(m_pRecvBuffer + m_nRecvBufferPos, m_nRecvBufferLen - m_nRecvBufferPos);
+	if (numread > 0)
+	{
+		SYSTEMTIME sTime;
+		GetSystemTime(&sTime);
+		VERIFY(SystemTimeToFileTime(&sTime, &m_LastRecvTime));
+
+		m_nRecvBufferPos += numread;
+		if (m_nRecvBufferLen-m_nRecvBufferPos < (BUFSIZE/4))
+		{
+			unsigned char *tmp=m_pRecvBuffer;
+			m_nRecvBufferLen *= 2;
+			m_pRecvBuffer = new unsigned char[m_nRecvBufferLen];
+			memcpy(m_pRecvBuffer, tmp, m_nRecvBufferPos);
+			delete [] tmp;
+		}
+		int parseResult;
+		while ((parseResult = ParseRecvBuffer()) > 0);
+
+		if (parseResult == -1)
+			return;
+	}
+	if (numread == 0)
+	{
+		if (ParseRecvBuffer() == -1)
+			return;
+		Close();
+		m_pAdminInterface->Remove(this);
+		return;
+	}
+	else if (numread == SOCKET_ERROR)
+	{
+		if (WSAGetLastError() != WSAEWOULDBLOCK)
+		{
+			if (ParseRecvBuffer() == -1)
+				return;
+			Close();
+			m_pAdminInterface->Remove(this);
+			return;
+		}
+	}
+	while (ParseRecvBuffer() > 0);
 }
 
-void CAdminSocket::OnClose(int nErrorCode)
+void CAdminSocket::OnSend(int nErrorCode)
 {
-	Close();
+	if (nErrorCode)
+	{
+		Close();
+		m_pAdminInterface->Remove(this);
+		return;
+	}
+
+	while (!m_SendBuffer.empty())
+	{
+		t_data data=m_SendBuffer.front();
+		m_SendBuffer.pop_front();
+		int nSent = Send(data.pData+data.dwOffset, data.dwLength-data.dwOffset);
+		if (!nSent)
+		{
+			Close();
+			m_pAdminInterface->Remove(this);
+			return;
+		}
+		if (nSent == SOCKET_ERROR)
+		{
+			if (WSAGetLastError() != WSAEWOULDBLOCK)
+			{
+				Close();
+				m_pAdminInterface->Remove(this);
+			}
+			m_SendBuffer.push_front(data);
+			return;
+		}
+		
+		if ((unsigned int)nSent<(data.dwLength-data.dwOffset))
+		{
+			data.dwOffset+=nSent;
+			m_SendBuffer.push_front(data);
+		}
+		else
+			delete [] data.pData;
+	}
 }
 
-void CAdminSocket::DoClose()
+int CAdminSocket::ParseRecvBuffer()
 {
-	m_bClosed = true;
-	Close();
+	if (m_nRecvBufferPos<5)
+		return 0;
+
+	if ((m_pRecvBuffer[0]&0x03) != 0)
+	{
+		SendCommand(_T("Protocol error: Unknown command type, closing connection."), 1);
+		Close();
+		m_pAdminInterface->Remove(this);
+		return -1;
+	}
+	else
+	{
+		DWORD len;
+		memcpy(&len, m_pRecvBuffer+1, 4);
+		if (len > 0xFFFFFF)
+		{
+			SendCommand(_T("Protocol error: Invalid data length, closing connection."), 1);
+			Close();
+			m_pAdminInterface->Remove(this);
+			return -1;
+		}
+		if (m_nRecvBufferPos < len+5)
+			return 0;
+		else
+		{
+			int nID = (m_pRecvBuffer[0]&0x7C) >> 2;
+			if (m_bStillNeedAuth)
+			{
+				if (nID)
+				{
+					SendCommand(_T("Protocol error: Not authenticated, closing connection."), 1);
+					Close();
+					m_pAdminInterface->Remove(this);
+					return -1;
+				}
+				if (len != 16)
+				{
+					SendCommand(_T("Protocol error: Auth data len invalid, closing connection."), 1);
+					Close();
+					m_pAdminInterface->Remove(this);
+					return -1;
+				}
+				MD5 md5;
+				md5.update(m_Nonce1, 8);
+				COptions options;
+				CStdString pass = options.GetOption(OPTION_ADMINPASS);
+				if (pass.GetLength() < 6)
+				{
+					SendCommand(_T("Protocol error: Server misconfigured, admin password not set correctly"), 1);
+					Close();
+					m_pAdminInterface->Remove(this);
+					return -1;
+				}
+				char* utf8 = ConvToNetwork(pass);
+				if (!utf8)
+				{
+					SendCommand(_T("Failed to convert password to UTF-8"), 1);
+					Close();
+					m_pAdminInterface->Remove(this);
+					return -1;
+				}
+				md5.update((unsigned char *)utf8, strlen(utf8));
+				delete [] utf8;
+				md5.update(m_Nonce2, 8);
+				md5.finalize();
+				unsigned char *digest = md5.raw_digest();
+				if (memcmp(m_pRecvBuffer + 5, digest, 16))
+				{
+					delete [] digest;
+					SendCommand(_T("Protocol error: Auth failed, closing connection."), 1);
+					Close();
+					m_pAdminInterface->Remove(this);
+					return -1;
+				}
+				delete [] digest;
+
+				FinishLogon();
+			}
+			else
+				m_pAdminInterface->ProcessCommand(this, nID, m_pRecvBuffer+5, len);
+			memmove(m_pRecvBuffer, m_pRecvBuffer+len+5, m_nRecvBufferPos-len-5);
+			m_nRecvBufferPos-=len+5;
+		}
+	}
+	return 1;
 }
 
-bool CAdminSocket::IsLocal()
+BOOL CAdminSocket::SendCommand(LPCTSTR pszCommand, int nTextType)
 {
-	CString ip;
-	UINT port;
-	if (!GetPeerName(ip, port))
-		return false;
+	DWORD nDataLength;
+	const char *utf8 = 0;
 
-	return IsLocalhost(ip);
+	if (!pszCommand)
+		nDataLength = 0;
+	else
+	{
+		utf8 = ConvToNetwork(pszCommand);
+		nDataLength = strlen(utf8) + 1;
+	}
+
+	t_data data;
+	data.pData = new unsigned char[nDataLength + 5];
+	*data.pData = 2;
+	*data.pData |= 1 << 2;
+	data.dwOffset = 0;
+	memcpy(data.pData + 1, &nDataLength, 4);
+	*(data.pData+5) = nTextType;
+	if (utf8)
+		memcpy(reinterpret_cast<char *>(data.pData+6), utf8, nDataLength - 1);
+	delete [] utf8;
+
+	data.dwLength = nDataLength + 5;
+
+	m_SendBuffer.push_back(data);
+	
+	do 
+	{
+		data = m_SendBuffer.front();
+		m_SendBuffer.pop_front();
+		int nSent = Send(data.pData + data.dwOffset, data.dwLength - data.dwOffset);
+		if (!nSent)
+			return FALSE;
+		if (nSent == SOCKET_ERROR)
+		{
+			if (WSAGetLastError() != WSAEWOULDBLOCK)
+				return FALSE;
+			m_SendBuffer.push_front(data);
+			return TRUE;
+		}
+		
+		if ((unsigned int)nSent < (data.dwLength - data.dwOffset))
+		{
+			data.dwOffset += nSent;
+			m_SendBuffer.push_front(data);
+		}
+		else
+			delete [] data.pData;
+	} while (!m_SendBuffer.empty());
+
+	return TRUE;
+}
+
+BOOL CAdminSocket::CheckForTimeout()
+{
+	SYSTEMTIME sTime;
+	FILETIME fTime;
+	GetSystemTime(&sTime);
+	VERIFY(SystemTimeToFileTime(&sTime, &fTime));
+	
+	_int64 LastRecvTime = ((_int64)m_LastRecvTime.dwHighDateTime << 32) + m_LastRecvTime.dwLowDateTime;
+	_int64 CurTime = ((_int64)fTime.dwHighDateTime << 32) + fTime.dwLowDateTime;
+
+	if ((CurTime - LastRecvTime) > 600000000) // 60 seconds
+		return TRUE;
+
+	return FALSE;
+}
+
+BOOL CAdminSocket::FinishLogon()
+{
+	m_bStillNeedAuth = FALSE;
+
+	//Logon successful
+	if (!SendCommand(1, 0, NULL, 0))
+		return FALSE;
+	return TRUE;
 }

@@ -17,12 +17,12 @@ public:
    {
    }
 
-   CString GetProcessorName(void)
+   CStdString GetProcessorName(void)
    {
-      CString sRC;
+      CStdString sRC;
 
-      CString sSpeed;
-      CString sVendor;
+      CStdString sSpeed;
+      CStdString sVendor;
 
    	// Get the processor speed info.
    	HKEY hKey;
@@ -62,7 +62,7 @@ public:
 	   // Make sure to close the reg key
       RegCloseKey (hKey);
 
-      CString sType;
+      CStdString sType;
 	   switch (m_sysInfo.dwProcessorType)
       {
       case PROCESSOR_INTEL_386:
@@ -85,12 +85,12 @@ public:
          break;
 	   }
       
-      CString sProcessors;
+      CStdString sProcessors;
       sProcessors.Format( _T("Number Of Processors: %lu "), m_sysInfo.dwNumberOfProcessors);
 
-      CString sArchitecture;
-      CString sProcessorLevel;
-      CString sStepping;
+      CStdString sArchitecture;
+      CStdString sProcessorLevel;
+      CStdString sStepping;
 
       switch(m_sysInfo.wProcessorArchitecture)
       {
@@ -240,9 +240,9 @@ public:
    {
    }
 
-   CString GetMemoryInfo(void)
+   CStdString GetMemoryInfo(void)
    {
-      CString sRC;
+      CStdString sRC;
 
 	   MEMORYSTATUS memoryStatus;
 

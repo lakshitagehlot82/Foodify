@@ -12,7 +12,8 @@ BOOL DisplaySystemVersion(LPTSTR buffer)
 	ZeroMemory(&osvi, sizeof(OSVERSIONINFOEX));
 	osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
 	
-	if( !(bOsVersionInfoEx = GetVersionEx ((OSVERSIONINFO *) &osvi)) )
+	bOsVersionInfoEx = GetVersionEx ((OSVERSIONINFO *) &osvi);
+	if( !bOsVersionInfoEx )
 	{
 		// If OSVERSIONINFOEX doesn't work, try OSVERSIONINFO.
 		osvi.dwOSVersionInfoSize = sizeof (OSVERSIONINFO);

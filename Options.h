@@ -22,48 +22,63 @@
 #if _MSC_VER > 1000
 #pragma once
 #endif // _MSC_VER > 1000
-// Options.h : Header-Datei
-//
 
-/////////////////////////////////////////////////////////////////////////////
-// Dialogfeld COptions 
+#include "OptionTypes.h"
+#include "SpeedLimit.h"
 
-#define IOPTION_STARTMINIMIZED 1
-#define IOPTION_LASTSERVERADDRESS 2
-#define IOPTION_LASTSERVERPORT 3
-#define IOPTION_LASTSERVERPASS 4
-#define IOPTION_ALWAYS 5
-#define IOPTION_USERSORTING 6
-#define IOPTION_FILENAMEDISPLAY 7
+#include <list>
 
-#define IOPTIONS_NUM 7
-
-class COptionsDlg;
+class TiXmlElement;
+class COptionsHelperWindow;
 class COptions
 {
-	friend COptionsDlg;
-// Konstruktion
+	friend COptionsHelperWindow;
+
 public:
-	CString GetOption(int nOptionID);
-	__int64 GetOptionVal(int nOptionID);
-	COptions();   // Standardkonstruktor
+	BOOL GetAsCommand(char **pBuffer, DWORD *nBufferLength);
+	CStdString GetOption(int nOptionID);
+	_int64 GetOptionVal(int nOptionID);
+
+	COptions();
 	virtual ~COptions();
-	void SetOption(int nOptionID, CString value);
-	void SetOption(int nOptionID, __int64 value);
-	
+
+	static TiXmlElement *GetXML();
+	static BOOL FreeXML(TiXmlElement *pXML, bool save);
+
+	BOOL ParseOptionsCommand(unsigned char *pData, DWORD dwDataLength, BOOL bFromLocal = FALSE);
+	void SetOption(int nOptionID, LPCTSTR value, bool save = true);
+	void SetOption(int nOptionID, _int64 value, bool save = true);
+	int GetCurrentSpeedLimit(int nMode);
+	void ReloadConfig();
+
 protected:
+
+	static CCriticalSectionWrapper m_Sync;
+	static std::list<COptions *> m_InstanceList;
 	static bool IsNumeric(LPCTSTR str);
-	
+
+	void SaveOptions();
+
+	BOOL ReadSpeedLimits(TiXmlElement *pXML);
+	BOOL SaveSpeedLimits(TiXmlElement* pSettings);
+
+	static SPEEDLIMITSLIST m_sSpeedLimits[2];
+	SPEEDLIMITSLIST m_SpeedLimits[2];
+
 	struct t_OptionsCache
 	{
 		BOOL bCached;
-		CTime createtime;
 		int nType;
-		CString str;
+		CStdString str;
 		_int64 value;
-	} m_OptionsCache[IOPTIONS_NUM];
+	} m_OptionsCache[OPTIONS_NUM];
+	static t_OptionsCache m_sOptionsCache[OPTIONS_NUM];
+
 	void Init();
 	static BOOL m_bInitialized;
+
+	static void UpdateInstances();
+	COptionsHelperWindow *m_pOptionsHelperWindow;
 };
 
 
